@@ -54,6 +54,7 @@ import org.apache.flink.runtime.webmonitor.handlers.JarUploadHandler;
 import org.apache.flink.runtime.webmonitor.handlers.JobAccumulatorsHandler;
 import org.apache.flink.runtime.webmonitor.handlers.JobCancellationHandler;
 import org.apache.flink.runtime.webmonitor.handlers.JobCancellationWithSavepointHandlers;
+import org.apache.flink.runtime.webmonitor.handlers.SavepointHandlers;
 import org.apache.flink.runtime.webmonitor.handlers.JobConfigHandler;
 import org.apache.flink.runtime.webmonitor.handlers.JobDetailsHandler;
 import org.apache.flink.runtime.webmonitor.handlers.JobExceptionsHandler;
@@ -165,7 +166,7 @@ public class WebRuntimeMonitor implements WebMonitor {
 		this.leaderRetrievalService = checkNotNull(leaderRetrievalService);
 		this.timeout = AkkaUtils.getTimeout(config);
 		this.retriever = new JobManagerRetriever(this, actorSystem, AkkaUtils.getTimeout(config), timeout);
-		
+
 		final WebMonitorConfig cfg = new WebMonitorConfig(config);
 
 		final String configuredAddress = cfg.getWebFrontendAddress();
@@ -174,9 +175,9 @@ public class WebRuntimeMonitor implements WebMonitor {
 		if (configuredPort < 0) {
 			throw new IllegalArgumentException("Web frontend port is invalid: " + configuredPort);
 		}
-		
+
 		final WebMonitorUtils.LogFileLocation logFiles = WebMonitorUtils.LogFileLocation.find(config);
-		
+
 		// create an empty directory in temp for the web server
 		String rootDirFileName = "flink-web-" + UUID.randomUUID();
 		webRootDir = new File(getBaseDir(config), rootDirFileName);
@@ -256,6 +257,10 @@ public class WebRuntimeMonitor implements WebMonitor {
 		RuntimeMonitorHandler triggerHandler = handler(cancelWithSavepoint.getTriggerHandler());
 		RuntimeMonitorHandler inProgressHandler = handler(cancelWithSavepoint.getInProgressHandler());
 
+		SavepointHandlers savepoint = new SavepointHandlers(currentGraphs, context, defaultSavepointDir);
+		RuntimeMonitorHandler savepointTriggerHandler = handler(savepoint.getTriggerHandler());
+		RuntimeMonitorHandler savepointInProgressHandler = handler(savepoint.getInProgressHandler());
+
 		router = new Router()
 			// config how to interact with this web server
 			.GET("/config", handler(new DashboardConfigHandler(cfg.getRefreshInterval())))
@@ -298,10 +303,10 @@ public class WebRuntimeMonitor implements WebMonitor {
 
 			.GET("/taskmanagers", handler(new TaskManagersHandler(DEFAULT_REQUEST_TIMEOUT, metricFetcher)))
 			.GET("/taskmanagers/:" + TaskManagersHandler.TASK_MANAGER_ID_KEY, handler(new TaskManagersHandler(DEFAULT_REQUEST_TIMEOUT, metricFetcher)))
-			.GET("/taskmanagers/:" + TaskManagersHandler.TASK_MANAGER_ID_KEY + "/log", 
+			.GET("/taskmanagers/:" + TaskManagersHandler.TASK_MANAGER_ID_KEY + "/log",
 				new TaskManagerLogHandler(retriever, context, jobManagerAddressPromise.future(), timeout,
 					TaskManagerLogHandler.FileMode.LOG, config, enableSSL))
-			.GET("/taskmanagers/:" + TaskManagersHandler.TASK_MANAGER_ID_KEY + "/stdout", 
+			.GET("/taskmanagers/:" + TaskManagersHandler.TASK_MANAGER_ID_KEY + "/stdout",
 				new TaskManagerLogHandler(retriever, context, jobManagerAddressPromise.future(), timeout,
 					TaskManagerLogHandler.FileMode.STDOUT, config, enableSSL))
 			.GET("/taskmanagers/:" + TaskManagersHandler.TASK_MANAGER_ID_KEY + "/metrics", handler(new TaskManagerMetricsHandler(metricFetcher)))
@@ -326,6 +331,10 @@ public class WebRuntimeMonitor implements WebMonitor {
 			.GET("/jobs/:jobid/cancel-with-savepoint", triggerHandler)
 			.GET("/jobs/:jobid/cancel-with-savepoint/target-directory/:targetDirectory", triggerHandler)
 			.GET(JobCancellationWithSavepointHandlers.IN_PROGRESS_URL, inProgressHandler)
+
+			.GET("/jobs/:jobid/savepoint", savepointTriggerHandler)
+			.GET("/jobs/:jobid/savepoint/target-directory/:targetDirectory", savepointTriggerHandler)
+			.GET(SavepointHandlers.IN_PROGRESS_URL, savepointInProgressHandler)
 
 			// stop a job via GET (for proper integration with YARN this has to be performed via GET)
 			.GET("/jobs/:jobid/yarn-stop", handler(new JobStoppingHandler()))
@@ -438,7 +447,7 @@ public class WebRuntimeMonitor implements WebMonitor {
 	@Override
 	public void start(String jobManagerAkkaUrl) throws Exception {
 		LOG.info("Starting with JobManager {} on port {}", jobManagerAkkaUrl, getServerPort());
-		
+
 		synchronized (startupShutdownLock) {
 			jobManagerAddressPromise.success(jobManagerAkkaUrl);
 			leaderRetrievalService.start(retriever);
